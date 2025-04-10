@@ -4,7 +4,7 @@ from scipy.io import wavfile
 from scipy.stats import entropy
 from scipy import stats
 import time
-from tensorflow.keras.models import Sequential
+from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import Dense, LSTM, Dropout
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
@@ -260,8 +260,9 @@ def prepare_training_data(wav_files, sequence_length=10):
         sample_rate, audio_data = wavfile.read(wav_file)
 
         # Keep as integers, just ensure int32 type for calculations
-        audio_data = audio_data.astype(np.int32)
+        audio_data = audio_data.astype(np.int16)
 
+        # breakpoint()
         count = 0
         # Create sequences of previous samples and their targets
         for i in range(len(audio_data) - sequence_length):
@@ -273,12 +274,12 @@ def prepare_training_data(wav_files, sequence_length=10):
             count += 1
 
             # For now bail early
-            if count > 1000:
+            if count > 100000:
                 break
 
     # Convert to numpy arrays
-    X = np.array(all_sequences, dtype=np.int32)
-    y = np.array(all_targets, dtype=np.int32)
+    X = np.array(all_sequences, dtype=np.int16)
+    y = np.array(all_targets, dtype=np.int16)
 
     # Reshape for LSTM input (samples, time steps, features)
     X = X.reshape((X.shape[0], X.shape[1], 1))
@@ -288,8 +289,8 @@ def prepare_training_data(wav_files, sequence_length=10):
 
 def train_prediction_model(
     wav_files,
-    model_path="audio_prediction_model.keras",
-    sequence_length=10,
+    model_path,
+    sequence_length,
     epochs=50,
     batch_size=32,
 ):
@@ -313,6 +314,8 @@ def train_prediction_model(
     split_idx = int(len(X) * 0.8)
     X_train, X_val = X[:split_idx], X[split_idx:]
     y_train, y_val = y[:split_idx], y[split_idx:]
+
+    print(f"X_train shape: {X_train.shape}")
 
     # Create the model
     model = Sequential(
@@ -354,53 +357,72 @@ def train_prediction_model(
     print(f"Best validation loss: {min(history.history['val_loss']):.6f}")
     print(f"Epochs trained: {len(history.history['loss'])}")
 
-    # Save the final trained model
-    final_model_path = model_path.replace(".h5", "_final.h5")
-    model.save(final_model_path)
-    print(f"Final model saved to {final_model_path}")
-
     return model, history
 
 
-def predict_with_model(model, audio_array, sequence_length=10):
+def predict_with_model(model_path, audio_array, sequence_length=10):
     """
     Use a trained model to predict the next sample and calculate prediction errors.
 
     Args:
-        model: The trained model
+        model_path: Path to the trained model file
         audio_array (numpy.ndarray): Input audio array
         sequence_length (int): Number of previous samples to use for prediction
 
     Returns:
         numpy.ndarray: Array of prediction errors (actual - predicted)
     """
-    # Keep as integers
-    audio_data = audio_array.astype(np.int32)
+    # Load the trained model
+    model = load_model(model_path)
+
+    # Keep as int16 to match training data
+    audio_data = audio_array.astype(np.int16)
 
     # Create an array to store the prediction errors
-    prediction_errors = np.zeros_like(audio_array, dtype=np.int32)
+    prediction_errors = np.zeros_like(audio_array, dtype=np.int16)
 
     # First sequence_length samples are output as is
     prediction_errors[:sequence_length] = audio_array[:sequence_length]
 
     # For all other samples, calculate the prediction error
+    count = 0
+    start_time = time.time()
     for i in range(sequence_length, len(audio_array)):
+        # print(f"Predicting sample {i} of {len(audio_array)}")
         # Get the sequence of previous samples
         sequence = audio_data[i - sequence_length : i]
 
         # Reshape for model input
         sequence = sequence.reshape((1, sequence_length, 1))
+        print(sequence)
 
         # Predict the next sample
         predicted = model.predict(sequence, verbose=0)[0, 0]
 
-        # Round to nearest integer
-        predicted = np.round(predicted).astype(np.int32)
+        # Round to nearest integer and convert to int16
+        predicted = np.round(predicted).astype(np.int16)
 
         # Calculate the prediction error (actual - predicted)
-        prediction_errors[i] = audio_array[i] - predicted
-
+        error = audio_array[i] - predicted
+        print(f"Predicted/actual: {predicted:6d}, {audio_array[i]:6d} {error:6d}")
+        prediction_errors[i] = error
+        count += 1
+        if count > 1000:
+            break
+    end_time = time.time()
+    seconds_per_sample = (end_time - start_time) / count
+    time_to_predict_a_second = seconds_per_sample * 44100
+    print(f"Prediction took {end_time - start_time:.4f} seconds")
+    print(f"Time to predict a second: {time_to_predict_a_second:.4f} seconds")
     return prediction_errors
+
+
+def call_train_prediction_model(sequence_length):
+    model_path = "audio_prediction_model.keras"
+    wav_files = ["audio/iphone_rest_of_the_file.wav"]
+    model, history = train_prediction_model(
+        wav_files, model_path, sequence_length=sequence_length
+    )
 
 
 def preliminary_work():
@@ -450,14 +472,17 @@ if __name__ == "__main__":
     # Example of using the neural network prediction
     # Uncomment and modify these lines to use the neural network
     """
-    # Train the model (only needed once)
-    wav_files = ["audio/iphone_rest_of_the_file.wav"]
-    model, history = train_prediction_model(wav_files, sequence_length=10)
+    sequence_length = 5
 
-    # Use the trained model for prediction
-    # nn_prediction_errors = predict_with_model(model, audio_array_10secs, sequence_length=10)
-    # print("\nUsing neural network prediction:")
-    # print(histogram_cli_representation(nn_prediction_errors))
-    # print(f"Entropy of neural network prediction errors: {calculate_entropy(nn_prediction_errors):.2f}")
+    call_train_prediction_model(sequence_length=sequence_length)
+    exit()
+    model_path = "audio_prediction_model2.keras"
 
-    # preliminary_work()
+    # audio_file = "audio/iphone_rest_of_the_file.wav"
+    audio_file = "audio/iphone_very_short.wav"
+    audio_array, sample_rate = load_wav_file(audio_file, preserve_dtype=True)
+    prediction_errors = predict_with_model(
+        model_path, audio_array, sequence_length=sequence_length
+    )
+    print(f"Entropy of prediction errors: {calculate_entropy(prediction_errors)}")
+    print(histogram_cli_representation(prediction_errors, compute_min_max=True))
