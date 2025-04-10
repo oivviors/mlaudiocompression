@@ -251,9 +251,9 @@ def prepare_training_data(wav_files, sequence_length=10):
         for i in range(len(audio_data) - sequence_length):
             sequence = audio_data[i : i + sequence_length]
             target = audio_data[i + sequence_length]
-
-            all_sequences.append(sequence)
-            all_targets.append(target)
+            if i % 100 == 0:  # For now
+                all_sequences.append(sequence)
+                all_targets.append(target)
 
     # Convert to numpy arrays
     X = np.array(all_sequences, dtype=np.float32)
@@ -497,7 +497,9 @@ def predict_with_model(model_path, audio_data, sequence_length=10):
 
         # Calculate the prediction error (actual - predicted)
         error = audio_data[i] - predicted
-        print(f"Predicted/actual: {predicted:6f}, {audio_data[i]:6f} {error:6f}")
+        print(
+            f"Predicted/actual: {int(predicted * 2**15):6d}, {int(audio_data[i] * 2**15):6d} {int(error * 2**15):6d}"
+        )
         prediction_errors[i] = error
         count += 1
         if count > 1000:
@@ -507,13 +509,11 @@ def predict_with_model(model_path, audio_data, sequence_length=10):
     time_to_predict_a_second = seconds_per_sample * 44100
     print(f"Prediction took {end_time - start_time:.4f} seconds")
     print(f"Time to predict a second: {time_to_predict_a_second:.4f} seconds")
+
+    # Ensure the entire array is int16
+    prediction_errors = (prediction_errors * 2**15).astype(np.int16)
+
     return prediction_errors
-
-
-def call_train_prediction_model(sequence_length, model_path, wav_files):
-    model, history = train_prediction_model(
-        wav_files, model_path, sequence_length=sequence_length
-    )
 
 
 def preliminary_work():
@@ -567,15 +567,15 @@ if __name__ == "__main__":
     wav_files = ["audio/iphone_rest_of_the_file.wav"]
     model_path = "audio_prediction_model2.keras"
 
-    model, history = train_prediction_model(
-        wav_files, model_path, sequence_length=sequence_length
-    )
+    # model, history = train_prediction_model(
+    #     wav_files, model_path, sequence_length=sequence_length
+    # )
 
-    exit()
+    # exit()
 
     # audio_file = "audio/iphone_rest_of_the_file.wav"
     audio_file = "audio/iphone_very_short.wav"
-    audio_array, sample_rate = load_wav_file(audio_file, preserve_dtype=True)
+    audio_array, sample_rate = load_wav_file(audio_file)
     prediction_errors = predict_with_model(
         model_path, audio_array, sequence_length=sequence_length
     )
