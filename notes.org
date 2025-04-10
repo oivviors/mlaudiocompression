@@ -5,3 +5,14 @@
 
 * Timings
 librosa reads a 7345 second 16 bit wav into a numpy array in 2.8 seconds or 2630 seconds in 1 second.
+
+
+* Entropy
+Entropy of 10 seconds of random 16 bit integers is 15.9.
+Entropy of 10 seconds of me talking into iphone is 12.21
+
+Entropy of 10 seconds of me talking into iphone after linear regression with n=2
+is 9.11, and takes 10.14 seconds to compute.
+
+Entropy of 10 seconds of me talking into iphone after simple linear regression with n=2
+is 9.11, and takes about 1.9 seconds to compute.
