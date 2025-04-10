@@ -5,9 +5,10 @@ from scipy.stats import entropy
 from scipy import stats
 import time
 from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import Dense, LSTM, Dropout
+from tensorflow.keras.layers import Dense, LSTM, Dropout, SimpleRNN, Input
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
+from tensorflow.keras.models import Model
 
 
 def calculate_entropy(array):
@@ -25,37 +26,22 @@ def calculate_entropy(array):
     return entropy(probabilities, base=2)
 
 
-def load_wav_file(file_path, preserve_dtype=True):
+def load_wav_file(file_path):
     """
     Load a WAV file and return it as a NumPy array.
 
     Args:
         file_path (str): Path to the WAV file
-        preserve_dtype (bool): If True, use scipy to load the file and preserve the original data type
 
     Returns:
         tuple: (audio_array, sample_rate)
-            - audio_array: NumPy array containing the audio data
+            - audio_array: NumPy array containing the audio data (as float32)
             - sample_rate: The sample rate of the audio file
     """
     try:
-        if preserve_dtype:
-            # Use scipy to load the file and preserve the original data type
-            sample_rate, audio_array = wavfile.read(file_path)
-            print("Loaded with scipy (preserving original data type)")
-        else:
-            # Load the audio file with librosa (converts to float32)
-            audio_array, sample_rate = librosa.load(file_path, sr=None)
-            print("Loaded with librosa (converted to float32)")
-
-        print(f"Successfully loaded {file_path}")
-        print(f"Audio shape: {audio_array.shape}")
-        print(f"Sample rate: {sample_rate} Hz")
-        print(f"Duration: {len(audio_array) / sample_rate:.2f} seconds")
-        print(f"Data type: {audio_array.dtype}")
-
+        # Load with librosa for robust WAV handling
+        audio_array, sample_rate = librosa.load(file_path, sr=None)
         return audio_array, sample_rate
-
     except Exception as e:
         print(f"Error loading file: {str(e)}")
         return None, None
@@ -257,6 +243,40 @@ def prepare_training_data(wav_files, sequence_length=10):
 
     for wav_file in wav_files:
         # Load the audio file
+        audio_data, sample_rate = load_wav_file(wav_file)
+
+        # Map to float32 in range [-1, 1]
+
+        # Create sequences of previous samples and their targets
+        for i in range(len(audio_data) - sequence_length):
+            sequence = audio_data[i : i + sequence_length]
+            target = audio_data[i + sequence_length]
+
+            all_sequences.append(sequence)
+            all_targets.append(target)
+
+    # Convert to numpy arrays
+    X = np.array(all_sequences, dtype=np.float32)
+    y = np.array(all_targets, dtype=np.float32)
+    return X, y
+
+
+def prepare_training_data_old(wav_files, sequence_length=10):
+    """
+    Prepare training data from a set of WAV files.
+
+    Args:
+        wav_files (list): List of paths to WAV files
+        sequence_length (int): Number of previous samples to use for prediction
+
+    Returns:
+        tuple: (X, y) where X is the input sequences and y is the target values
+    """
+    all_sequences = []
+    all_targets = []
+
+    for wav_file in wav_files:
+        # Load the audio file
         sample_rate, audio_data = wavfile.read(wav_file)
 
         # Keep as integers, just ensure int32 type for calculations
@@ -317,10 +337,90 @@ def train_prediction_model(
 
     print(f"X_train shape: {X_train.shape}")
 
+    # sequence_length = 10
+    input_size = 1  # each sample is a single value
+    hidden_size = 128
+
+    # Create the model using the recommended approach with Input layer
+    # Define the input layer
+    inputs = Input(shape=(sequence_length, input_size))
+
+    # Add the RNN layer
+    x = SimpleRNN(hidden_size)(inputs)
+
+    # Add the output layer
+    outputs = Dense(1)(x)
+
+    # Create the model
+    model = Model(inputs=inputs, outputs=outputs)
+
+    # Compile the model
+    model.compile(optimizer=Adam(learning_rate=0.001), loss="mse")
+
+    # Callbacks for training
+    callbacks = [
+        ModelCheckpoint(model_path, save_best_only=True, monitor="val_loss"),
+        EarlyStopping(patience=5, monitor="val_loss"),
+    ]
+
+    # Train the model
+    print(f"Training model on {len(wav_files)} files...")
+    history = model.fit(
+        X_train,
+        y_train,
+        validation_data=(X_val, y_val),
+        epochs=epochs,
+        batch_size=batch_size,
+        callbacks=callbacks,
+        verbose=1,
+    )
+
+    # Print training summary
+    print("\nTraining Summary:")
+    print(f"Final training loss: {history.history['loss'][-1]:.6f}")
+    print(f"Final validation loss: {history.history['val_loss'][-1]:.6f}")
+    print(f"Best validation loss: {min(history.history['val_loss']):.6f}")
+    print(f"Epochs trained: {len(history.history['loss'])}")
+
+    return model, history
+
+
+def train_prediction_model_old(
+    wav_files,
+    model_path,
+    sequence_length,
+    epochs=50,
+    batch_size=32,
+):
+    """
+    Train a neural network to predict the next audio sample.
+
+    Args:
+        wav_files (list): List of paths to WAV files for training
+        model_path (str): Path to save the trained model
+        sequence_length (int): Number of previous samples to use for prediction
+        epochs (int): Number of training epochs
+        batch_size (int): Batch size for training
+
+    Returns:
+        tuple: (model, history) where model is the trained model and history contains training metrics
+    """
+    # Prepare training data
+    X, y = prepare_training_data(wav_files, sequence_length)
+
+    # Split into training and validation sets
+    split_idx = int(len(X) * 0.8)
+    X_train, X_val = X[:split_idx], X[split_idx:]
+    y_train, y_val = y[:split_idx], y[split_idx:]
+
+    print(f"X_train shape: {X_train.shape}")
+
     # Create the model
     model = Sequential(
         [
-            LSTM(64, input_shape=(sequence_length, 1), return_sequences=True),
+            LSTM(
+                64, input_shape=(sequence_length, 1), return_sequences=True
+            ),  # lstm slow
             Dropout(0.2),
             LSTM(32),
             Dropout(0.2),
@@ -360,7 +460,7 @@ def train_prediction_model(
     return model, history
 
 
-def predict_with_model(model_path, audio_array, sequence_length=10):
+def predict_with_model(model_path, audio_data, sequence_length=10):
     """
     Use a trained model to predict the next sample and calculate prediction errors.
 
@@ -375,36 +475,29 @@ def predict_with_model(model_path, audio_array, sequence_length=10):
     # Load the trained model
     model = load_model(model_path)
 
-    # Keep as int16 to match training data
-    audio_data = audio_array.astype(np.int16)
-
     # Create an array to store the prediction errors
-    prediction_errors = np.zeros_like(audio_array, dtype=np.int16)
+    prediction_errors = np.zeros_like(audio_data, dtype=np.float32)
 
     # First sequence_length samples are output as is
-    prediction_errors[:sequence_length] = audio_array[:sequence_length]
+    prediction_errors[:sequence_length] = audio_data[:sequence_length]
 
     # For all other samples, calculate the prediction error
     count = 0
     start_time = time.time()
-    for i in range(sequence_length, len(audio_array)):
+    for i in range(sequence_length, len(audio_data)):
         # print(f"Predicting sample {i} of {len(audio_array)}")
         # Get the sequence of previous samples
         sequence = audio_data[i - sequence_length : i]
 
         # Reshape for model input
         sequence = sequence.reshape((1, sequence_length, 1))
-        print(sequence)
 
         # Predict the next sample
         predicted = model.predict(sequence, verbose=0)[0, 0]
 
-        # Round to nearest integer and convert to int16
-        predicted = np.round(predicted).astype(np.int16)
-
         # Calculate the prediction error (actual - predicted)
-        error = audio_array[i] - predicted
-        print(f"Predicted/actual: {predicted:6d}, {audio_array[i]:6d} {error:6d}")
+        error = audio_data[i] - predicted
+        print(f"Predicted/actual: {predicted:6f}, {audio_data[i]:6f} {error:6f}")
         prediction_errors[i] = error
         count += 1
         if count > 1000:
@@ -417,9 +510,7 @@ def predict_with_model(model_path, audio_array, sequence_length=10):
     return prediction_errors
 
 
-def call_train_prediction_model(sequence_length):
-    model_path = "audio_prediction_model.keras"
-    wav_files = ["audio/iphone_rest_of_the_file.wav"]
+def call_train_prediction_model(sequence_length, model_path, wav_files):
     model, history = train_prediction_model(
         wav_files, model_path, sequence_length=sequence_length
     )
@@ -473,10 +564,14 @@ if __name__ == "__main__":
     # Uncomment and modify these lines to use the neural network
     """
     sequence_length = 5
-
-    call_train_prediction_model(sequence_length=sequence_length)
-    exit()
+    wav_files = ["audio/iphone_rest_of_the_file.wav"]
     model_path = "audio_prediction_model2.keras"
+
+    model, history = train_prediction_model(
+        wav_files, model_path, sequence_length=sequence_length
+    )
+
+    exit()
 
     # audio_file = "audio/iphone_rest_of_the_file.wav"
     audio_file = "audio/iphone_very_short.wav"
