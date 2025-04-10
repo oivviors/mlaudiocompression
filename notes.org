@@ -1,0 +1,7 @@
+# ML lossless audio compression
+
+
+
+
+* Timings
+librosa reads a 7345 second 16 bit wav into a numpy array in 2.8 seconds or 2630 seconds in 1 second.
