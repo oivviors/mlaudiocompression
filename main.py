@@ -4,11 +4,57 @@ from scipy.io import wavfile
 from scipy.stats import entropy
 from scipy import stats
 import time
+import platform
+import tensorflow as tf
 from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import Dense, LSTM, Dropout, SimpleRNN, Input
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
 from tensorflow.keras.models import Model
+
+
+def configure_gpu():
+    """
+    Configure GPU usage for TensorFlow, specifically for macOS.
+    Returns True if GPU is available and configured, False otherwise.
+    """
+    # Check if running on macOS
+    if platform.system() == "Darwin":
+        try:
+            # Check if Metal plugin is available
+            if tf.config.list_physical_devices("GPU"):
+                # Set memory growth to avoid taking all GPU memory
+                for gpu in tf.config.list_physical_devices("GPU"):
+                    tf.config.experimental.set_memory_growth(gpu, True)
+
+                # Set mixed precision policy for better performance
+                tf.keras.mixed_precision.set_global_policy("mixed_float16")
+
+                print("Metal GPU detected and configured for TensorFlow")
+                print(f"TensorFlow version: {tf.__version__}")
+                print(f"GPU devices: {tf.config.list_physical_devices('GPU')}")
+                return True
+            else:
+                print("No Metal GPU detected. Using CPU for TensorFlow operations.")
+                return False
+        except Exception as e:
+            print(f"Error configuring GPU: {e}")
+            return False
+    else:
+        # For non-macOS systems, let TensorFlow handle GPU detection
+        gpus = tf.config.list_physical_devices("GPU")
+        if gpus:
+            try:
+                for gpu in gpus:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+                print(f"GPU detected and configured: {gpus}")
+                return True
+            except RuntimeError as e:
+                print(f"Error configuring GPU: {e}")
+                return False
+        else:
+            print("No GPU detected. Using CPU for TensorFlow operations.")
+            return False
 
 
 def calculate_entropy(array):
@@ -327,6 +373,9 @@ def train_prediction_model(
     Returns:
         tuple: (model, history) where model is the trained model and history contains training metrics
     """
+    gpu_available = configure_gpu()
+    print(f"Using {'GPU' if gpu_available else 'CPU'} for training")
+
     # Prepare training data
     X, y = prepare_training_data(wav_files, sequence_length)
 
@@ -354,8 +403,12 @@ def train_prediction_model(
     # Create the model
     model = Model(inputs=inputs, outputs=outputs)
 
-    # Compile the model
-    model.compile(optimizer=Adam(learning_rate=0.001), loss="mse")
+    # Compile the model with mixed precision
+    optimizer = Adam(learning_rate=0.001)
+    if gpu_available:
+        optimizer = tf.keras.mixed_precision.LossScaleOptimizer(optimizer)
+
+    model.compile(optimizer=optimizer, loss="mse")
 
     # Callbacks for training
     callbacks = [
@@ -365,12 +418,23 @@ def train_prediction_model(
 
     # Train the model
     print(f"Training model on {len(wav_files)} files...")
+
+    # Use tf.data.Dataset for better performance
+    train_dataset = (
+        tf.data.Dataset.from_tensor_slices((X_train, y_train))
+        .batch(batch_size)
+        .prefetch(tf.data.AUTOTUNE)
+    )
+    val_dataset = (
+        tf.data.Dataset.from_tensor_slices((X_val, y_val))
+        .batch(batch_size)
+        .prefetch(tf.data.AUTOTUNE)
+    )
+
     history = model.fit(
-        X_train,
-        y_train,
-        validation_data=(X_val, y_val),
+        train_dataset,
+        validation_data=val_dataset,
         epochs=epochs,
-        batch_size=batch_size,
         callbacks=callbacks,
         verbose=1,
     )
@@ -472,6 +536,9 @@ def predict_with_model(model_path, audio_data, sequence_length=10):
     Returns:
         numpy.ndarray: Array of prediction errors (actual - predicted)
     """
+    gpu_available = configure_gpu()
+    print(f"Using {'GPU' if gpu_available else 'CPU'} for inference")
+
     # Load the trained model
     model = load_model(model_path)
 
@@ -484,26 +551,42 @@ def predict_with_model(model_path, audio_data, sequence_length=10):
     # For all other samples, calculate the prediction error
     count = 0
     start_time = time.time()
-    for i in range(sequence_length, len(audio_data)):
-        # print(f"Predicting sample {i} of {len(audio_array)}")
-        # Get the sequence of previous samples
-        sequence = audio_data[i - sequence_length : i]
+
+    # Process in batches for better GPU utilization
+    batch_size = 32
+    for i in range(sequence_length, len(audio_data), batch_size):
+        end_idx = min(i + batch_size, len(audio_data))
+        batch_sequences = []
+
+        for j in range(i, end_idx):
+            sequence = audio_data[j - sequence_length : j]
+            batch_sequences.append(sequence)
 
         # Reshape for model input
-        sequence = sequence.reshape((1, sequence_length, 1))
+        batch_sequences = np.array(batch_sequences).reshape(-1, sequence_length, 1)
 
-        # Predict the next sample
-        predicted = model.predict(sequence, verbose=0)[0, 0]
+        # Predict the next samples
+        predicted = model.predict(batch_sequences, verbose=0)
 
-        # Calculate the prediction error (actual - predicted)
-        error = audio_data[i] - predicted
-        print(
-            f"Predicted/actual: {int(predicted * 2**15):6d}, {int(audio_data[i] * 2**15):6d} {int(error * 2**15):6d}"
-        )
-        prediction_errors[i] = error
-        count += 1
+        # Calculate the prediction errors
+        for j, pred in enumerate(predicted):
+            idx = i + j
+            if idx < len(audio_data):
+                error = audio_data[idx] - pred[0]
+                prediction_errors[idx] = error
+                count += 1
+
+                if count % 100 == 0:
+                    print(
+                        f"Predicted/actual: {int(pred[0] * 2**15):6d}, {int(audio_data[idx] * 2**15):6d} {int(error * 2**15):6d}"
+                    )
+
+                if count > 1000:
+                    break
+
         if count > 1000:
             break
+
     end_time = time.time()
     seconds_per_sample = (end_time - start_time) / count
     time_to_predict_a_second = seconds_per_sample * 44100
@@ -563,13 +646,14 @@ if __name__ == "__main__":
     # Example of using the neural network prediction
     # Uncomment and modify these lines to use the neural network
     """
-    sequence_length = 5
+    # tried sequence_length 3,5, 10
+    sequence_length = 25
     wav_files = ["audio/iphone_rest_of_the_file.wav"]
     model_path = "audio_prediction_model2.keras"
 
-    # model, history = train_prediction_model(
-    #     wav_files, model_path, sequence_length=sequence_length
-    # )
+    model, history = train_prediction_model(
+        wav_files, model_path, sequence_length=sequence_length
+    )
 
     # exit()
 
